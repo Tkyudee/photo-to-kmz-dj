@@ -2,3 +2,4 @@ streamlit
 simplekml
 Pillow
 rarfile
+pytesseract
