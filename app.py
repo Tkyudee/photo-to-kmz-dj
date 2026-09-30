@@ -12,7 +12,6 @@ def get_exif_location(image):
         if not exif:
             return None
 
-        # Look for GPS info in EXIF IFD
         gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
         if not gps_ifd:
             return None
@@ -40,7 +39,7 @@ def get_exif_location(image):
             if gps_data.get('GPSLongitudeRef') == 'W':
                 lon = -lon
 
-            return lon, lat # KML requires Longitude, Latitude order
+            return lon, lat
     except Exception:
         return None
     return None
@@ -48,28 +47,44 @@ def get_exif_location(image):
 # --- Web App Interface ---
 st.set_page_config(page_title="Photo to KMZ Converter", layout="centered")
 st.title("📍 Photo to KMZ Converter")
-st.write("Upload photos to extract coordinates. **Mobile Users:** Please select photos from your phone's 'Files' or 'Documents' folder (not the Gallery) to preserve the original filenames and GPS data.")
+st.write("**Mobile Users:** To prevent Android from renaming files to 'inbound' and deleting GPS data, **compress your photos into a .zip file** on your phone first, then upload the .zip file here.")
 
-uploaded_files = st.file_uploader("Upload Photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload Photos OR a .zip file", type=["jpg", "jpeg", "png", "zip"], accept_multiple_files=True)
 
 if uploaded_files and st.button("Generate KMZ"):
     kml = simplekml.Kml()
     valid_photos = 0
 
     for file in uploaded_files:
-        try:
-            # The 'with' statement ensures the image is closed immediately, preventing memory crashes
-            with Image.open(file) as img:
-                coords = get_exif_location(img)
-
-                if coords:
-                    pin_name = os.path.splitext(file.name)[0]
-                    kml.newpoint(name=pin_name, coords=[coords])
-                    valid_photos += 1
-                else:
-                    st.warning(f"No GPS metadata found in {file.name}. (Was it uploaded from a Gallery app?)")
-        except Exception as e:
-            st.error(f"Error processing {file.name}: {e}")
+        # Check if the uploaded file is a ZIP archive
+        if file.name.lower().endswith('.zip'):
+            try:
+                with zipfile.ZipFile(file, 'r') as z:
+                    for filename in z.namelist():
+                        # Process only image files inside the zip
+                        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            with z.open(filename) as f:
+                                with Image.open(f) as img:
+                                    coords = get_exif_location(img)
+                                    if coords:
+                                        # Use the exact original filename from inside the zip
+                                        pin_name = os.path.splitext(os.path.basename(filename))[0]
+                                        kml.newpoint(name=pin_name, coords=[coords])
+                                        valid_photos += 1
+            except Exception as e:
+                st.error(f"Error reading zip file: {e}")
+        
+        # Handle regular image uploads (for PC users or unstripped files)
+        else:
+            try:
+                with Image.open(file) as img:
+                    coords = get_exif_location(img)
+                    if coords:
+                        pin_name = os.path.splitext(file.name)[0]
+                        kml.newpoint(name=pin_name, coords=[coords])
+                        valid_photos += 1
+            except Exception as e:
+                pass
 
     if valid_photos > 0:
         st.success(f"Successfully processed {valid_photos} photos! 🎉")
