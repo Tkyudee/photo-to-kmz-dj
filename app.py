@@ -1,116 +1,103 @@
 import streamlit as st
 import simplekml
-from PIL import Image, ExifTags
+from PIL import Image
 import zipfile
 import rarfile
 import tempfile
 import io
 import os
+import pytesseract
+import re
 
-def get_exif_location(image):
-    """Safely extracts EXIF GPS data without crashing if data is missing."""
+def extract_stamp_data(image):
+    """Scans the image visually for text, finds the coordinates, and grabs the line above as the pin name."""
     try:
-        exif = image.getexif()
-        if not exif:
-            return None
-
-        gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
-        if not gps_ifd:
-            return None
-
-        gps_data = {ExifTags.GPSTAGS.get(key, key): val for key, val in gps_ifd.items()}
-
-        def convert_to_degrees(value):
-            try:
-                d = float(value[0])
-                m = float(value[1])
-                s = float(value[2])
-                return d + (m / 60.0) + (s / 3600.0)
-            except:
-                return None
-
-        if 'GPSLatitude' in gps_data and 'GPSLongitude' in gps_data:
-            lat = convert_to_degrees(gps_data['GPSLatitude'])
-            lon = convert_to_degrees(gps_data['GPSLongitude'])
+        # Convert to grayscale to make the white text pop against the black background for better reading
+        gray_image = image.convert('L')
+        text = pytesseract.image_to_string(gray_image)
+        
+        # Split the scanned text into individual lines
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        
+        for i, line in enumerate(lines):
+            # Look for a pattern that matches Latitude, Longitude (e.g., "7.08874, 125.61593")
+            match = re.search(r'(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)', line)
             
-            if lat is None or lon is None:
-                return None
-
-            if gps_data.get('GPSLatitudeRef') == 'S':
-                lat = -lat
-            if gps_data.get('GPSLongitudeRef') == 'W':
-                lon = -lon
-
-            return lon, lat
-    except Exception:
-        return None
-    return None
+            if match:
+                lat = float(match.group(1))
+                lon = float(match.group(2))
+                
+                # The pin name (e.g., "2023017cc7-9") is the line directly above the coordinates
+                if i > 0:
+                    pin_name = lines[i-1]
+                else:
+                    pin_name = "Unknown_Pole"
+                
+                return pin_name, (lon, lat)
+    except Exception as e:
+        return None, None
+        
+    return None, None
 
 # --- Web App Interface ---
-st.set_page_config(page_title="Photo to KMZ Converter", layout="centered")
-st.title("📍 Photo to KMZ Converter")
-st.write("**Mobile Users:** Compress your photos into a `.zip` or `.rar` file on your phone first, then upload it here to preserve original filenames and GPS data.")
+st.set_page_config(page_title="Visual OCR Photo to KMZ", layout="centered")
+st.title("📍 Visual OCR Photo to KMZ")
+st.write("Upload photos, `.zip`, or `.rar` files. The app will visually scan the photo for Conota stamp text to determine the pole name and coordinates.")
 
-# Notice we removed the strict file types here so mobile phones don't grey out zip/rar files
 uploaded_files = st.file_uploader("Upload Photos, .zip, or .rar files", accept_multiple_files=True)
 
 if uploaded_files and st.button("Generate KMZ"):
     kml = simplekml.Kml()
     valid_photos = 0
 
-    for file in uploaded_files:
-        
-        # --- HANDLE ZIP FILES ---
-        if file.name.lower().endswith('.zip'):
-            try:
-                with zipfile.ZipFile(file, 'r') as z:
-                    for filename in z.namelist():
-                        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                            with z.open(filename) as f:
-                                with Image.open(f) as img:
-                                    coords = get_exif_location(img)
-                                    if coords:
-                                        pin_name = os.path.splitext(os.path.basename(filename))[0]
-                                        kml.newpoint(name=pin_name, coords=[coords])
-                                        valid_photos += 1
-            except Exception as e:
-                st.error(f"Error reading zip file {file.name}: {e}")
-                
-        # --- HANDLE RAR FILES ---
-        elif file.name.lower().endswith('.rar'):
-            try:
-                # Save the RAR to a temporary file on the server so 'unrar' can read it
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.rar') as tmp:
-                    tmp.write(file.getvalue())
-                    tmp_path = tmp.name
+    with st.spinner("Scanning images for text... This may take a moment."):
+        for file in uploaded_files:
+            
+            # --- HANDLE ZIP FILES ---
+            if file.name.lower().endswith('.zip'):
+                try:
+                    with zipfile.ZipFile(file, 'r') as z:
+                        for filename in z.namelist():
+                            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                with z.open(filename) as f:
+                                    with Image.open(f) as img:
+                                        pin_name, coords = extract_stamp_data(img)
+                                        if coords and pin_name:
+                                            kml.newpoint(name=pin_name, coords=[coords])
+                                            valid_photos += 1
+                except Exception as e:
+                    st.error(f"Error reading zip file {file.name}: {e}")
+                    
+            # --- HANDLE RAR FILES ---
+            elif file.name.lower().endswith('.rar'):
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.rar') as tmp:
+                        tmp.write(file.getvalue())
+                        tmp_path = tmp.name
 
-                with rarfile.RarFile(tmp_path) as r:
-                    for filename in r.namelist():
-                        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                            with r.open(filename) as f:
-                                with Image.open(f) as img:
-                                    coords = get_exif_location(img)
-                                    if coords:
-                                        pin_name = os.path.splitext(os.path.basename(filename))[0]
-                                        kml.newpoint(name=pin_name, coords=[coords])
-                                        valid_photos += 1
-                
-                # Delete the temporary file to free up memory immediately
-                os.remove(tmp_path)
-            except Exception as e:
-                st.error(f"Error reading RAR file {file.name}: {e}")
+                    with rarfile.RarFile(tmp_path) as r:
+                        for filename in r.namelist():
+                            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                                with r.open(filename) as f:
+                                    with Image.open(f) as img:
+                                        pin_name, coords = extract_stamp_data(img)
+                                        if coords and pin_name:
+                                            kml.newpoint(name=pin_name, coords=[coords])
+                                            valid_photos += 1
+                    os.remove(tmp_path)
+                except Exception as e:
+                    st.error(f"Error reading RAR file {file.name}: {e}")
 
-        # --- HANDLE DIRECT IMAGE UPLOADS ---
-        elif file.name.lower().endswith(('.png', '.jpg', '.jpeg')):
-            try:
-                with Image.open(file) as img:
-                    coords = get_exif_location(img)
-                    if coords:
-                        pin_name = os.path.splitext(file.name)[0]
-                        kml.newpoint(name=pin_name, coords=[coords])
-                        valid_photos += 1
-            except Exception as e:
-                pass
+            # --- HANDLE DIRECT IMAGE UPLOADS ---
+            elif file.name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                try:
+                    with Image.open(file) as img:
+                        pin_name, coords = extract_stamp_data(img)
+                        if coords and pin_name:
+                            kml.newpoint(name=pin_name, coords=[coords])
+                            valid_photos += 1
+                except Exception as e:
+                    pass
 
     if valid_photos > 0:
         st.success(f"Successfully processed {valid_photos} photos! 🎉")
@@ -121,8 +108,8 @@ if uploaded_files and st.button("Generate KMZ"):
         st.download_button(
             label="📥 Download KMZ File",
             data=kmz_io.getvalue(),
-            file_name="photos_map.kmz",
+            file_name="scanned_photos_map.kmz",
             mime="application/vnd.google-earth.kmz"
         )
     else:
-        st.error("None of the uploaded photos contained valid GPS coordinates.")
+        st.error("No valid text stamps containing coordinates could be read from the uploaded photos.")
