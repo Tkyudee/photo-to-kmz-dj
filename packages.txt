@@ -1,1 +1,2 @@
 unrar-free
+tesseract-ocr
