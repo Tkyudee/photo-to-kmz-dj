@@ -2,6 +2,8 @@ import streamlit as st
 import simplekml
 from PIL import Image, ExifTags
 import zipfile
+import rarfile
+import tempfile
 import io
 import os
 
@@ -47,35 +49,59 @@ def get_exif_location(image):
 # --- Web App Interface ---
 st.set_page_config(page_title="Photo to KMZ Converter", layout="centered")
 st.title("📍 Photo to KMZ Converter")
-st.write("**Mobile Users:** To prevent Android from renaming files to 'inbound' and deleting GPS data, **compress your photos into a .zip file** on your phone first, then upload the .zip file here.")
+st.write("**Mobile Users:** Compress your photos into a `.zip` or `.rar` file on your phone first, then upload it here to preserve original filenames and GPS data.")
 
-uploaded_files = st.file_uploader("Upload Photos OR a .zip file", type=["jpg", "jpeg", "png", "zip"], accept_multiple_files=True)
+# Notice we removed the strict file types here so mobile phones don't grey out zip/rar files
+uploaded_files = st.file_uploader("Upload Photos, .zip, or .rar files", accept_multiple_files=True)
 
 if uploaded_files and st.button("Generate KMZ"):
     kml = simplekml.Kml()
     valid_photos = 0
 
     for file in uploaded_files:
-        # Check if the uploaded file is a ZIP archive
+        
+        # --- HANDLE ZIP FILES ---
         if file.name.lower().endswith('.zip'):
             try:
                 with zipfile.ZipFile(file, 'r') as z:
                     for filename in z.namelist():
-                        # Process only image files inside the zip
                         if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                             with z.open(filename) as f:
                                 with Image.open(f) as img:
                                     coords = get_exif_location(img)
                                     if coords:
-                                        # Use the exact original filename from inside the zip
                                         pin_name = os.path.splitext(os.path.basename(filename))[0]
                                         kml.newpoint(name=pin_name, coords=[coords])
                                         valid_photos += 1
             except Exception as e:
-                st.error(f"Error reading zip file: {e}")
-        
-        # Handle regular image uploads (for PC users or unstripped files)
-        else:
+                st.error(f"Error reading zip file {file.name}: {e}")
+                
+        # --- HANDLE RAR FILES ---
+        elif file.name.lower().endswith('.rar'):
+            try:
+                # Save the RAR to a temporary file on the server so 'unrar' can read it
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.rar') as tmp:
+                    tmp.write(file.getvalue())
+                    tmp_path = tmp.name
+
+                with rarfile.RarFile(tmp_path) as r:
+                    for filename in r.namelist():
+                        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                            with r.open(filename) as f:
+                                with Image.open(f) as img:
+                                    coords = get_exif_location(img)
+                                    if coords:
+                                        pin_name = os.path.splitext(os.path.basename(filename))[0]
+                                        kml.newpoint(name=pin_name, coords=[coords])
+                                        valid_photos += 1
+                
+                # Delete the temporary file to free up memory immediately
+                os.remove(tmp_path)
+            except Exception as e:
+                st.error(f"Error reading RAR file {file.name}: {e}")
+
+        # --- HANDLE DIRECT IMAGE UPLOADS ---
+        elif file.name.lower().endswith(('.png', '.jpg', '.jpeg')):
             try:
                 with Image.open(file) as img:
                     coords = get_exif_location(img)
