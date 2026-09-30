@@ -36,7 +36,7 @@ def extract_from_filename(filename):
 
 # --- Web App Interface ---
 st.set_page_config(page_title="Filename to KMZ Converter", layout="centered")
-st.title("📍 Filename to KMZ Converter")
+st.title("📍 Tkyudee KMZ converter")
 st.write("Upload `.zip`, `.rar`, or photos. The app instantly extracts the Pin Name and Coordinates directly from the filename.")
 
 uploaded_files = st.file_uploader("Upload Photos, .zip, or .rar files", accept_multiple_files=True)
