@@ -1,98 +1,87 @@
 import streamlit as st
 import simplekml
-from PIL import Image
-from PIL.ExifTags import TAGS, GPSTAGS
+from PIL import Image, ExifTags
 import zipfile
 import io
 import os
 
-def get_exif_data(image):
-    """Extracts raw EXIF data from the image."""
-    exif_data = {}
-    info = image._getexif()
-    if info:
-        for tag, value in info.items():
-            decoded = TAGS.get(tag, tag)
-            if decoded == "GPSInfo":
-                gps_data = {}
-                for t in value:
-                    sub_decoded = GPSTAGS.get(t, t)
-                    gps_data[sub_decoded] = value[t]
-                exif_data[decoded] = gps_data
-            else:
-                exif_data[decoded] = value
-    return exif_data
-
-def get_decimal_coordinates(info):
-    """Converts standard GPS EXIF data to decimal format (Longitude, Latitude)."""
-    for key in ['Latitude', 'Longitude']:
-        if 'GPS'+key not in info or 'GPS'+key+'Ref' not in info:
+def get_exif_location(image):
+    """Safely extracts EXIF GPS data without crashing if data is missing."""
+    try:
+        exif = image.getexif()
+        if not exif:
             return None
 
-    def convert_to_degrees(value):
-        d, m, s = value
-        return float(d) + (float(m) / 60.0) + (float(s) / 3600.0)
+        # Look for GPS info in EXIF IFD
+        gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
+        if not gps_ifd:
+            return None
 
-    lat = convert_to_degrees(info['GPSLatitude'])
-    lon = convert_to_degrees(info['GPSLongitude'])
+        gps_data = {ExifTags.GPSTAGS.get(key, key): val for key, val in gps_ifd.items()}
 
-    if info['GPSLatitudeRef'] != 'N':
-        lat = -lat
-    if info['GPSLongitudeRef'] != 'E':
-        lon = -lon
-
-    return lon, lat
-
-# --- Streamlit Web App Interface ---
-st.set_page_config(page_title="Photo to KMZ Converter", layout="centered")
-
-st.title("📍 Photo to KMZ Converter")
-st.write("Upload a folder of photos. The app will extract their GPS coordinates and output a KMZ file with pins named after the files.")
-
-uploaded_files = st.file_uploader("Upload Photos (JPG/PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-
-if uploaded_files:
-    if st.button("Generate KMZ"):
-        kml = simplekml.Kml()
-        valid_photos = 0
-
-        for file in uploaded_files:
+        def convert_to_degrees(value):
             try:
-                # Open image and extract metadata
-                img = Image.open(file)
-                exif = get_exif_data(img)
-                
-                if 'GPSInfo' in exif:
-                    coords = get_decimal_coordinates(exif['GPSInfo'])
-                    if coords:
-                        # Get filename without extension for the pin name
-                        pin_name = os.path.splitext(file.name)[0]
-                        
-                        # Create the point in KML
-                        kml.newpoint(name=pin_name, coords=[coords])
-                        valid_photos += 1
-                    else:
-                        st.warning(f"Could not parse coordinates for {file.name}")
-                else:
-                    st.warning(f"No GPS metadata found in {file.name}")
-            except Exception as e:
-                st.error(f"Error processing {file.name}: {e}")
+                d = float(value[0])
+                m = float(value[1])
+                s = float(value[2])
+                return d + (m / 60.0) + (s / 3600.0)
+            except:
+                return None
 
-        if valid_photos > 0:
-            st.success(f"Successfully processed {valid_photos} photos! 🎉")
+        if 'GPSLatitude' in gps_data and 'GPSLongitude' in gps_data:
+            lat = convert_to_degrees(gps_data['GPSLatitude'])
+            lon = convert_to_degrees(gps_data['GPSLongitude'])
             
-            # Generate KML string and zip it into a KMZ file in-memory
-            kml_string = kml.kml()
-            kmz_io = io.BytesIO()
-            with zipfile.ZipFile(kmz_io, 'w', zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr('map.kml', kml_string)
-            
-            # Provide the download button
-            st.download_button(
-                label="📥 Download KMZ File",
-                data=kmz_io.getvalue(),
-                file_name="photos_map.kmz",
-                mime="application/vnd.google-earth.kmz"
-            )
-        else:
-            st.error("None of the uploaded photos contained valid GPS coordinates.")
+            if lat is None or lon is None:
+                return None
+
+            if gps_data.get('GPSLatitudeRef') == 'S':
+                lat = -lat
+            if gps_data.get('GPSLongitudeRef') == 'W':
+                lon = -lon
+
+            return lon, lat # KML requires Longitude, Latitude order
+    except Exception:
+        return None
+    return None
+
+# --- Web App Interface ---
+st.set_page_config(page_title="Photo to KMZ Converter", layout="centered")
+st.title("📍 Photo to KMZ Converter")
+st.write("Upload photos to extract coordinates. **Mobile Users:** Please select photos from your phone's 'Files' or 'Documents' folder (not the Gallery) to preserve the original filenames and GPS data.")
+
+uploaded_files = st.file_uploader("Upload Photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+
+if uploaded_files and st.button("Generate KMZ"):
+    kml = simplekml.Kml()
+    valid_photos = 0
+
+    for file in uploaded_files:
+        try:
+            # The 'with' statement ensures the image is closed immediately, preventing memory crashes
+            with Image.open(file) as img:
+                coords = get_exif_location(img)
+
+                if coords:
+                    pin_name = os.path.splitext(file.name)[0]
+                    kml.newpoint(name=pin_name, coords=[coords])
+                    valid_photos += 1
+                else:
+                    st.warning(f"No GPS metadata found in {file.name}. (Was it uploaded from a Gallery app?)")
+        except Exception as e:
+            st.error(f"Error processing {file.name}: {e}")
+
+    if valid_photos > 0:
+        st.success(f"Successfully processed {valid_photos} photos! 🎉")
+        kmz_io = io.BytesIO()
+        with zipfile.ZipFile(kmz_io, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('map.kml', kml.kml())
+        
+        st.download_button(
+            label="📥 Download KMZ File",
+            data=kmz_io.getvalue(),
+            file_name="photos_map.kmz",
+            mime="application/vnd.google-earth.kmz"
+        )
+    else:
+        st.error("None of the uploaded photos contained valid GPS coordinates.")
